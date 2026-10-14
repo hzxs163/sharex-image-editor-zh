@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+report.json
+untranslated.txt
+汉化报告.json
+未翻译清单.txt
+*.tmp-zh
+dl/

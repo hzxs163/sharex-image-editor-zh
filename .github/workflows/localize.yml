@@ -1,0 +1,202 @@
+name: Sync ShareX and publish Chinese localization
+
+on:
+  schedule:
+    - cron: '0 4 */2 * *'          # every 2 days, 04:00 UTC
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Publish again even if this upstream version was already processed'
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - 'dictionary/**'            # dictionary edits should rebuild right away
+      - 'tools/**'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: localize-sharex
+  cancel-in-progress: false
+
+jobs:
+  localize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install analysis dependencies
+        run: python -m pip install --quiet dnfile dncil
+
+      - name: Find the latest ShareX release
+        id: up
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/ShareX/ShareX/releases/latest > /tmp/up.json
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          d = json.load(open('/tmp/up.json'))
+          tag = d['tag_name']
+          assets = [a for a in d['assets'] if 'portable' in a['name'] and a['name'].endswith('.zip')]
+          if not assets:
+              assets = [a for a in d['assets'] if a['name'].endswith('.zip')]
+          a = assets[0]
+          print('tag=%s' % tag.lstrip('v'))
+          print('asset=%s' % a['name'])
+          print('asset_id=%s' % a['id'])
+          print('digest=%s' % (a.get('digest') or '').replace('sha256:', ''))
+          print('size=%s' % a['size'])
+          PY
+
+      - name: Skip when this upstream version is already published
+        id: need
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ github.event.inputs.force }}
+        run: |
+          want="v${{ steps.up.outputs.tag }}-zh"
+          if [ "$FORCE" = "true" ]; then
+            echo "release=$want" >> "$GITHUB_OUTPUT"; echo "run=1" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if gh release view "$want" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "已有 $want，官方无新版本，跳过。"
+            echo "run=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=$want" >> "$GITHUB_OUTPUT"; echo "run=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download the official portable archive
+        if: steps.need.outputs.run == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dl work out
+          gh release download "v${{ steps.up.outputs.tag }}" \
+            --repo ShareX/ShareX \
+            --pattern "${{ steps.up.outputs.asset }}" \
+            --dir dl --clobber
+          echo "downloaded:"; ls -l dl
+
+      - name: Verify the archive against GitHub's published sha256
+        if: steps.need.outputs.run == '1'
+        run: |
+          python - <<'PY'
+          import hashlib, os, sys
+          want = "${{ steps.up.outputs.digest }}".strip()
+          path = os.path.join('dl', os.listdir('dl')[0])
+          h = hashlib.sha256(open(path, 'rb').read()).hexdigest()
+          print('file   :', path, os.path.getsize(path), 'bytes')
+          print('sha256 :', h)
+          print('official:', want)
+          if not want:
+              print('::warning::上游没有提供 digest，跳过完整性校验')
+          elif h != want:
+              print('::error::下载文件与官方 sha256 不一致，终止'); sys.exit(1)
+          PY
+
+      - name: Extract ShareX.ImageEditor.dll
+        if: steps.need.outputs.run == '1'
+        run: |
+          python - <<'PY'
+          import os, shutil, zipfile
+          zp = os.path.join('dl', os.listdir('dl')[0])
+          with zipfile.ZipFile(zp) as z:
+              names = [n for n in z.namelist() if os.path.basename(n) == 'ShareX.ImageEditor.dll']
+              if len(names) != 1:
+                  raise SystemExit('expected exactly one ShareX.ImageEditor.dll in the archive, got %r' % names)
+              with z.open(names[0]) as src, open('work/ShareX.ImageEditor.dll', 'wb') as dst:
+                  shutil.copyfileobj(src, dst)
+          print('extracted', names[0], os.path.getsize('work/ShareX.ImageEditor.dll'), 'bytes')
+          PY
+
+      - name: Run the localization pipeline
+        if: steps.need.outputs.run == '1'
+        run: |
+          python tools/pipeline.py \
+            --dll work/ShareX.ImageEditor.dll \
+            --out out/ShareX.ImageEditor.dll \
+            --report out/report.json \
+            --untranslated out/untranslated.txt | tee out/pipeline.log
+
+      - name: Stage release assets
+        if: steps.need.outputs.run == '1'
+        env:
+          UP_TAG: ${{ steps.up.outputs.tag }}
+        run: |
+          cp dictionary/zh_all.json out/zh_dictionary.json
+          cp client/apply_localization.py out/
+          cp "client/应用汉化.bat" out/ 2>/dev/null || true
+          cp "client/恢复英文原版.bat" out/ 2>/dev/null || true
+          python - <<'PY'
+          import json, io, os
+          r = json.load(open('out/report.json'))
+          tag = os.environ.get('UP_TAG', '')
+          r['upstream_tag'] = tag
+          json.dump(r, open('out/report.json', 'w'), ensure_ascii=False, indent=1)
+          untr = io.open('out/untranslated.txt', encoding='utf-8').read().splitlines() if os.path.isfile('out/untranslated.txt') else []
+          body = []
+          body.append('## ShareX %s 图像编辑器中文汉化\n' % tag)
+          body.append('| 项目 | 值 |')
+          body.append('| --- | --- |')
+          body.append('| 官方原版 sha256 | `%s` |' % r['sha256_before'])
+          body.append('| 汉化后 sha256 | `%s` |' % r['sha256_after'])
+          body.append('| 文件大小 | %d 字节（未改变：%s）|' % (r['size_after_bytes'], r['size_preserved']))
+          body.append('| 改动字节数 | %d（全部位于字符串表内）|' % r['bytes_changed'])
+          body.append('| 已翻译界面文字 | %d 条 |' % r['translated'])
+          body.append('| 识别为界面文字但词典未收录 | %d 条（其中值得注意的 %d 条）|' % (r['untranslated_count'], r.get('untranslated_reportable_count', 0)))
+          body.append('')
+          body.append('### 安装')
+          body.append('1. 完全退出 ShareX（托盘图标右键 → 退出）。')
+          body.append('2. 下载 `ShareX.ImageEditor.dll`，覆盖到 ShareX 安装目录里的同名文件（先自己留一份原件）。')
+          body.append('3. 或者把 `应用汉化.bat` 放到 ShareX 安装目录旁边双击，它会自动备份再打补丁。')
+          body.append('')
+          body.append('### 说明')
+          body.append('- 补丁只替换程序里的界面文字，文件长度不变，代码与元数据结构未改动。')
+          body.append('- 少数英文是**故意保留**的：同一段文字既显示给人看又被程序当内部标识符用，翻译会让功能失效；'
+                      '另有一些下拉值来自枚举名，不属于字符串字面量。')
+          body.append('- 汉化前保存的效果预设里，被翻译过的下拉选项值（英文）会匹配不上，该参数会退回默认值。')
+          if untr:
+              body.append('')
+              body.append('### 本次仍未翻译、且可能被看到的文字')
+              for t in untr[:40]:
+                  body.append('- `%s`' % t.replace('`', ''))
+          io.open('out/release-body.md', 'w', encoding='utf-8').write('\n'.join(body))
+          print('\n'.join(body[:12]))
+          PY
+
+      - name: Publish the release
+        if: steps.need.outputs.run == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.need.outputs.release }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "ShareX ${{ steps.up.outputs.tag }} 图像编辑器汉化" \
+            --notes-file out/release-body.md \
+            --latest \
+            out/ShareX.ImageEditor.dll \
+            out/apply_localization.py \
+            "out/应用汉化.bat" \
+            "out/恢复英文原版.bat" \
+            out/zh_dictionary.json \
+            out/untranslated.txt \
+            out/report.json || {
+              echo "发布失败，列出目录内容："; ls -l out; exit 1; }
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### ShareX 汉化同步";
+            echo "- 上游版本：\`${{ steps.up.outputs.tag }}\`";
+            echo "- 是否发布：\`${{ steps.need.outputs.run }}\` (1=是)";
+            if [ -f out/report.json ]; then echo "- 报告：\`$(cat out/report.json | tr -d '\n' | head -c 500)\`"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
