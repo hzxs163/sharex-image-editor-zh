@@ -8,6 +8,12 @@ Usage: python patch_us.py <dll> <dict.json> [--apply] [--allow allow.json]
   dict.json : {"English source": "中文翻译"}
 """
 import json, sys, os, shutil, struct, argparse
+try:  # the Windows console defaults to GBK; force UTF-8 so printing Chinese cannot abort the run
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 from pe_us import PE
 
 

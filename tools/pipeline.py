@@ -21,6 +21,12 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
 DLL_NAME = 'ShareX.ImageEditor.dll'
+try:  # the Windows console defaults to GBK; force UTF-8 so printing Chinese cannot abort the run
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 
 
 DEBUGISH = (

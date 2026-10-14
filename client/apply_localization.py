@@ -13,6 +13,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
 DLL_NAME = 'ShareX.ImageEditor.dll'
+try:  # the Windows console defaults to GBK; force UTF-8 so printing Chinese cannot abort the run
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 PRISTINE_DIR = os.path.join(ROOT, 'original')
 
 
