@@ -159,8 +159,9 @@ jobs:
           body.append('')
           body.append('### 安装')
           body.append('1. 完全退出 ShareX（托盘图标右键 → 退出）。')
-          body.append('2. 下载 `ShareX.ImageEditor.dll`，覆盖到 ShareX 安装目录里的同名文件（先自己留一份原件）。')
-          body.append('3. 或者把 `应用汉化.bat` 放到 ShareX 安装目录旁边双击，它会自动备份再打补丁。')
+          body.append('2. 下载 `ShareX-%s-ImageEditor.zh.dll`，改名成 `ShareX.ImageEditor.dll` 覆盖安装目录里的同名文件（先自己留一份原件）。' % tag)
+          body.append('3. 或者把 `apply_localization.py` 和 `apply-zh.bat`（应用汉化）放进 ShareX 安装目录，双击 bat：'
+                      '它会检查 ShareX 是否运行、自动备份、再按你这一版二进制重新识别并打补丁。还原用 `restore-en.bat`。')
           body.append('')
           body.append('### 说明')
           body.append('- 补丁只替换程序里的界面文字，文件长度不变，代码与元数据结构未改动。')
@@ -185,25 +186,39 @@ jobs:
           MODE: ${{ steps.need.outputs.mode }}
         run: |
           set -e
-          mkdir -p stage
+          rm -rf stage && mkdir -p stage
           cp out/ShareX.ImageEditor.dll "stage/ShareX-${TITLE}-ImageEditor.zh.dll"
-          cp out/apply_localization.py stage/
-          cp out/zh_dictionary.json stage/
-          cp out/untranslated.txt stage/ 2>/dev/null || : > stage/untranslated.txt
-          cp out/report.json stage/
-          cp "client/应用汉化.bat" stage/
-          cp "client/恢复英文原版.bat" stage/
+          cp out/apply_localization.py stage/apply_localization.py
+          cp out/zh_dictionary.json stage/zh_dictionary.json
+          cp out/report.json stage/report.json
+          cp out/release-body.md stage/RELEASE_NOTES.md
+          [ -f out/untranslated.txt ] && cp out/untranslated.txt stage/untranslated.txt || : > stage/untranslated.txt
+          # asset names stay ASCII: uploads.github.com rejected a CJK asset name on the first run
+          cp "client/应用汉化.bat" stage/apply-zh.bat
+          cp "client/恢复英文原版.bat" stage/restore-en.bat
+          ls -l stage
           cd stage
-          if [ "$MODE" = "create" ]; then
-            gh release create "$REL" --repo "$GITHUB_REPOSITORY" \
-              --title "ShareX ${TITLE} 图像编辑器汉化" \
-              --notes-file ../out/release-body.md --latest ./*
+          if [ "$MODE" = "create" ] && ! gh release view "$REL" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            for try in 1 2 3; do
+              if gh release create "$REL" --repo "$GITHUB_REPOSITORY" \
+                   --title "ShareX ${TITLE} 图像编辑器汉化" \
+                   --notes-file RELEASE_NOTES.md --latest ./*; then
+                break
+              fi
+              echo "attempt $try failed, retrying in 10s"
+              sleep 10
+              gh release delete "$REL" --repo "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
+              [ "$try" = 3 ] && exit 1
+            done
           else
-            gh release edit "$REL" --repo "$GITHUB_REPOSITORY" \
-              --notes-file ../out/release-body.md
+            gh release edit "$REL" --repo "$GITHUB_REPOSITORY" --notes-file RELEASE_NOTES.md \
+              --title "ShareX ${TITLE} 图像编辑器汉化"
             gh release upload "$REL" --repo "$GITHUB_REPOSITORY" --clobber ./*
           fi
           cd ..
+          n=$(gh release view "$REL" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets | length')
+          echo "assets uploaded: $n"
+          test "$n" -ge 8 || { echo "expected at least 8 assets, got $n"; exit 1; }
           echo "发布完成：$REL ($MODE)"
 
       - name: Summary
