@@ -56,25 +56,29 @@ jobs:
           print('size=%s' % a['size'])
           PY
 
-      - name: Skip when this upstream version is already published
+      - name: Decide whether to build
         id: need
         env:
           GH_TOKEN: ${{ github.token }}
           FORCE: ${{ github.event.inputs.force }}
+          TRIGGER: ${{ github.event_name }}
         run: |
           want="v${{ steps.up.outputs.tag }}-zh"
-          if [ "$FORCE" = "true" ]; then
-            echo "release=$want" >> "$GITHUB_OUTPUT"; echo "run=1" >> "$GITHUB_OUTPUT"; exit 0
-          fi
+          echo "release=$want" >> "$GITHUB_OUTPUT"
           if gh release view "$want" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "已有 $want，官方无新版本，跳过。"
-            echo "run=0" >> "$GITHUB_OUTPUT"
+            if [ "$TRIGGER" = "schedule" ] && [ "$FORCE" != "true" ]; then
+              echo "已有 $want，官方无新版本，跳过。"
+              echo "mode=skip" >> "$GITHUB_OUTPUT"
+            else
+              echo "该上游版本已发布过，本次按词典/工具变更做更新发布。"
+              echo "mode=update" >> "$GITHUB_OUTPUT"
+            fi
           else
-            echo "release=$want" >> "$GITHUB_OUTPUT"; echo "run=1" >> "$GITHUB_OUTPUT"
+            echo "mode=create" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Download the official portable archive
-        if: steps.need.outputs.run == '1'
+        if: steps.need.outputs.mode != 'skip'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -86,7 +90,7 @@ jobs:
           echo "downloaded:"; ls -l dl
 
       - name: Verify the archive against GitHub's published sha256
-        if: steps.need.outputs.run == '1'
+        if: steps.need.outputs.mode != 'skip'
         run: |
           python - <<'PY'
           import hashlib, os, sys
@@ -103,7 +107,7 @@ jobs:
           PY
 
       - name: Extract ShareX.ImageEditor.dll
-        if: steps.need.outputs.run == '1'
+        if: steps.need.outputs.mode != 'skip'
         run: |
           python - <<'PY'
           import os, shutil, zipfile
@@ -118,7 +122,7 @@ jobs:
           PY
 
       - name: Run the localization pipeline
-        if: steps.need.outputs.run == '1'
+        if: steps.need.outputs.mode != 'skip'
         run: |
           python tools/pipeline.py \
             --dll work/ShareX.ImageEditor.dll \
@@ -127,7 +131,7 @@ jobs:
             --untranslated out/untranslated.txt | tee out/pipeline.log
 
       - name: Stage release assets
-        if: steps.need.outputs.run == '1'
+        if: steps.need.outputs.mode != 'skip'
         env:
           UP_TAG: ${{ steps.up.outputs.tag }}
         run: |
@@ -173,30 +177,43 @@ jobs:
           PY
 
       - name: Publish the release
-        if: steps.need.outputs.run == '1'
+        if: steps.need.outputs.mode != 'skip'
         env:
           GH_TOKEN: ${{ github.token }}
+          REL: ${{ steps.need.outputs.release }}
+          TITLE: ${{ steps.up.outputs.tag }}
+          MODE: ${{ steps.need.outputs.mode }}
         run: |
-          gh release create "${{ steps.need.outputs.release }}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "ShareX ${{ steps.up.outputs.tag }} 图像编辑器汉化" \
-            --notes-file out/release-body.md \
-            --latest \
-            out/ShareX.ImageEditor.dll \
-            out/apply_localization.py \
-            "out/应用汉化.bat" \
-            "out/恢复英文原版.bat" \
-            out/zh_dictionary.json \
-            out/untranslated.txt \
-            out/report.json || {
-              echo "发布失败，列出目录内容："; ls -l out; exit 1; }
+          set -e
+          mkdir -p stage
+          cp out/ShareX.ImageEditor.dll "stage/ShareX-${TITLE}-ImageEditor.zh.dll"
+          cp out/apply_localization.py stage/
+          cp out/zh_dictionary.json stage/
+          cp out/untranslated.txt stage/ 2>/dev/null || : > stage/untranslated.txt
+          cp out/report.json stage/
+          cp "client/应用汉化.bat" stage/
+          cp "client/恢复英文原版.bat" stage/
+          cd stage
+          if [ "$MODE" = "create" ]; then
+            gh release create "$REL" --repo "$GITHUB_REPOSITORY" \
+              --title "ShareX ${TITLE} 图像编辑器汉化" \
+              --notes-file ../out/release-body.md --latest ./*
+          else
+            gh release edit "$REL" --repo "$GITHUB_REPOSITORY" \
+              --notes-file ../out/release-body.md
+            gh release upload "$REL" --repo "$GITHUB_REPOSITORY" --clobber ./*
+          fi
+          cd ..
+          echo "发布完成：$REL ($MODE)"
 
       - name: Summary
         if: always()
         run: |
           {
-            echo "### ShareX 汉化同步";
-            echo "- 上游版本：\`${{ steps.up.outputs.tag }}\`";
-            echo "- 是否发布：\`${{ steps.need.outputs.run }}\` (1=是)";
-            if [ -f out/report.json ]; then echo "- 报告：\`$(cat out/report.json | tr -d '\n' | head -c 500)\`"; fi
+            echo "### ShareX 汉化同步"
+            echo "- 上游版本：\`${{ steps.up.outputs.tag }}\`"
+            echo "- 动作：\`${{ steps.need.outputs.mode }}\`（create=新版本发布 / update=词典更新 / skip=官方无变化）"
+            if [ -f out/report.json ]; then
+              echo "- 报告：\`$(tr -d '\n' < out/report.json | head -c 500)\`"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
